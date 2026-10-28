@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Search a word (or part of a word) in a TextGrid tier and play occurrences.
 Usage: python tg_search.py [file.TextGrid] [file.wav]   (both optional, openable in the GUI)
-Needs: pip install sounddevice soundfile matplotlib"""
+Needs: pip install sounddevice soundfile matplotlib praat-parselmouth"""
 import os
 import re
 import subprocess
@@ -99,6 +99,47 @@ def draw_segment(png, x, sr, t0, tiers, hl_tier, hl, fmax=5000):
     fig.savefig(png, bbox_inches="tight")
 
 
+COLS = ("word", "start", "f0_Hz", "F1_Hz", "F2_Hz", "CoG_Hz", "SD_Hz", "skewness", "kurtosis", "VOT_ms")
+
+
+def acoustics(data, sr, s, e, fmax=5500, f0min=75, f0max=500, ctx=0.2):
+    """Return [f0, F1, F2, CoG, SD, skewness, kurtosis, VOT_ms] for the interval s-e.
+    Pitch/formants are computed on a padded window (ctx) and averaged over s-e;
+    the spectral moments are computed on s-e only. VOT is a rough estimate."""
+    import numpy as np
+    import parselmouth
+    from parselmouth.praat import call
+
+    x = data.mean(axis=1) if data.ndim > 1 else data
+    w0 = max(0.0, s - ctx)
+    w1 = min(len(x) / sr, e + ctx)
+    seg = x[int(w0 * sr):int(w1 * sr)].astype("float64")
+    rs, re_ = s - w0, e - w0
+    snd = parselmouth.Sound(seg, sr)
+    pitch = snd.to_pitch(pitch_floor=f0min, pitch_ceiling=f0max)
+    form = snd.to_formant_burg(maximum_formant=fmax)
+    spec = snd.extract_part(from_time=rs, to_time=re_).to_spectrum()
+    f0 = call(pitch, "Get mean", rs, re_, "Hertz")
+    f1 = call(form, "Get mean", 1, rs, re_, "hertz")
+    f2 = call(form, "Get mean", 2, rs, re_, "hertz")
+
+    # VOT (estimate): burst = steepest rise of the smoothed |dx| envelope,
+    # voicing onset = first voiced pitch frame after the burst
+    vot = float("nan")
+    y = seg[int(rs * sr):int(re_ * sr)]
+    if len(y) > 8:
+        n = max(1, int(0.002 * sr))
+        env = np.convolve(np.abs(np.diff(y)), np.ones(n) / n, mode="same")
+        tb = rs + int(np.argmax(np.diff(env))) / sr
+        t = pitch.xs()
+        f = pitch.selected_array["frequency"]
+        v = t[(t > tb) & (t <= re_) & (f > 0)]
+        if len(v):
+            vot = (v[0] - tb) * 1000
+    return [f0, f1, f2, spec.get_center_of_gravity(), spec.get_standard_deviation(),
+            spec.get_skewness(), spec.get_kurtosis(), vot]
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -152,6 +193,7 @@ class App:
         ttk.Button(exp, text="Export wav + picture…", command=self.export).pack(side="left", padx=(10, 0))
         ttk.Button(exp, text="Select all", command=lambda: self.set_all(True)).pack(side="left", padx=(10, 2))
         ttk.Button(exp, text="Deselect all", command=lambda: self.set_all(False)).pack(side="left")
+        ttk.Button(exp, text="Acoustic properties", command=self.props).pack(side="left", padx=(10, 0))
 
         cols = ("chk", "time", "left", "word", "right")
         self.tree = ttk.Treeview(root, columns=cols, show="headings", height=20)
@@ -238,6 +280,44 @@ class App:
         self.checked = set(range(len(self.hits))) if state else set()
         for iid in self.tree.get_children():
             self.tree.set(iid, "chk", "☑" if state else "☐")
+
+    def props(self):
+        if self.data is None:
+            messagebox.showinfo("Acoustics", "Open a WAV file first.")
+            return
+        idx = sorted(self.checked) or [int(i) for i in self.tree.selection()[:1]]
+        if not idx:
+            messagebox.showinfo("Acoustics", "Check or select an occurrence first.")
+            return
+        rows = []
+        try:
+            for i in idx:
+                s, e, w, *_ = self.hits[i]
+                rows.append([w, f"{s:.3f}"] + [f"{v:.2f}" for v in acoustics(self.data, self.sr, s, e)])
+        except Exception as ex:
+            messagebox.showerror("Acoustics", str(ex))
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Acoustic properties")
+        tv = ttk.Treeview(win, columns=COLS, show="headings", height=min(20, len(rows)))
+        for c in COLS:
+            tv.heading(c, text=c)
+            tv.column(c, width=140 if c == "word" else 85, anchor="w")
+        for r in rows:
+            tv.insert("", "end", values=r)
+        tv.pack(fill="both", expand=True, padx=6, pady=6)
+        ttk.Button(win, text="Save as text…", command=lambda: self.save_props(rows)).pack(pady=(0, 6))
+
+    def save_props(self, rows):
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("Text", "*.txt"),("csv", "*.csv")],
+                                            initialdir=self.out_dir or os.getcwd())
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\t".join(COLS) + "\n")
+            for r in rows:
+                f.write("\t".join(r) + "\n")
+        self.status.config(text=f"saved {path}")
 
     def run(self):
         if not self.tiers:
