@@ -150,6 +150,8 @@ class App:
         self.suffix = ttk.Entry(exp, width=12)
         self.suffix.pack(side="left")
         ttk.Button(exp, text="Export wav + picture…", command=self.export).pack(side="left", padx=(10, 0))
+        ttk.Button(exp, text="Select all", command=lambda: self.set_all(True)).pack(side="left", padx=(10, 2))
+        ttk.Button(exp, text="Deselect all", command=lambda: self.set_all(False)).pack(side="left")
 
         cols = ("chk", "time", "left", "word", "right")
         self.tree = ttk.Treeview(root, columns=cols, show="headings", height=20)
@@ -231,6 +233,11 @@ class App:
             self.checked.add(i)
         self.tree.set(iid, "chk", "☑" if i in self.checked else "☐")
         return "break"
+
+    def set_all(self, state):
+        self.checked = set(range(len(self.hits))) if state else set()
+        for iid in self.tree.get_children():
+            self.tree.set(iid, "chk", "☑" if state else "☐")
 
     def run(self):
         if not self.tiers:
