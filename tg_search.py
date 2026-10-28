@@ -146,14 +146,20 @@ class App:
         self.xpad = ttk.Spinbox(exp, from_=0, to=5, increment=0.05, width=4)
         self.xpad.set("0.0")
         self.xpad.pack(side="left")
+        ttk.Label(exp, text="Suffix").pack(side="left", padx=(10, 2))
+        self.suffix = ttk.Entry(exp, width=12)
+        self.suffix.pack(side="left")
         ttk.Button(exp, text="Export wav + picture…", command=self.export).pack(side="left", padx=(10, 0))
 
-        cols = ("time", "left", "word", "right")
+        cols = ("chk", "time", "left", "word", "right")
         self.tree = ttk.Treeview(root, columns=cols, show="headings", height=20)
-        for c, w in zip(cols, (80, 300, 120, 300)):
-            self.tree.heading(c, text=c)
-            self.tree.column(c, width=w, anchor="e" if c == "left" else "w")
+        for c, w in zip(cols, (30, 80, 300, 120, 300)):
+            self.tree.heading(c, text="" if c == "chk" else c)
+            self.tree.column(c, width=w, anchor="center" if c == "chk" else ("e" if c == "left" else "w"),
+                             stretch=c != "chk")
         self.tree.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.checked = set()
+        self.tree.bind("<Button-1>", self.on_click)
         self.tree.bind("<Double-1>", lambda _: self.play())
         self.tree.bind("<Return>", lambda _: self.play())
 
@@ -212,14 +218,29 @@ class App:
         self.wav_path = os.path.abspath(path)
         self.update_files_label()
 
+    def on_click(self, ev):
+        if self.tree.identify_region(ev.x, ev.y) != "cell" or self.tree.identify_column(ev.x) != "#1":
+            return
+        iid = self.tree.identify_row(ev.y)
+        if not iid:
+            return
+        i = int(iid)
+        if i in self.checked:
+            self.checked.discard(i)
+        else:
+            self.checked.add(i)
+        self.tree.set(iid, "chk", "☑" if i in self.checked else "☐")
+        return "break"
+
     def run(self):
         if not self.tiers:
             messagebox.showinfo("Search", "Open a TextGrid first.")
             return
         self.hits = search(self.tiers[self.tier.get()], self.q.get())
+        self.checked.clear()
         self.tree.delete(*self.tree.get_children())
         for i, (s, e, w, l, r, *_) in enumerate(self.hits):
-            self.tree.insert("", "end", iid=str(i), values=(f"{s:.2f}", l, w, r))
+            self.tree.insert("", "end", iid=str(i), values=("☐", f"{s:.2f}", l, w, r))
         self.status.config(text=f"{len(self.hits)} occurrence(s)")
 
     def play(self):
@@ -240,32 +261,34 @@ class App:
         if self.data is None:
             messagebox.showinfo("Export", "Open a WAV file first.")
             return
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("Export", "Select an occurrence first.")
+        idx = sorted(self.checked) or [int(i) for i in self.tree.selection()[:1]]
+        if not idx:
+            messagebox.showinfo("Export", "Check or select an occurrence first.")
             return
-        s, e, w, _, _, ls, re_ = self.hits[int(sel[0])]
-        mode = self.ctx.get()
-        a = ls if mode in ("word + left", "word + both") else s
-        b = re_ if mode in ("word + right", "word + both") else e
-        pad = float(self.xpad.get())
-        t0 = max(0.0, a - pad)
-        t1 = min(len(self.data) / self.sr, b + pad)
         folder = filedialog.askdirectory(title="Export to folder", initialdir=self.out_dir or os.getcwd())
         if not folder:
             return
         self.out_dir = folder
+        mode = self.ctx.get()
+        pad = float(self.xpad.get())
+        suffix = re.sub(r"\W+", "_", self.suffix.get().strip()).strip("_")
         stem = os.path.splitext(getattr(self, "wav_name", "audio"))[0]
-        safe = re.sub(r"\W+", "_", w)[:30]
-        base = os.path.join(folder, f"{stem}_{t0:.2f}_{safe}")
-        seg = self.data[int(t0 * self.sr):int(t1 * self.sr)]
         try:
-            sf.write(base + ".wav", seg, self.sr)
-            draw_segment(base + ".png", seg, self.sr, t0, self.tiers, self.tier.get(), (s, e))
+            for i in idx:
+                s, e, w, _, _, ls, re_ = self.hits[i]
+                a = ls if mode in ("word + left", "word + both") else s
+                b = re_ if mode in ("word + right", "word + both") else e
+                t0 = max(0.0, a - pad)
+                t1 = min(len(self.data) / self.sr, b + pad)
+                safe = re.sub(r"\W+", "_", w)[:30]
+                base = os.path.join(folder, f"{stem}_{t0:.2f}_{safe}" + (f"_{suffix}" if suffix else ""))
+                seg = self.data[int(t0 * self.sr):int(t1 * self.sr)]
+                sf.write(base + ".wav", seg, self.sr)
+                draw_segment(base + ".png", seg, self.sr, t0, self.tiers, self.tier.get(), (s, e))
         except Exception as ex:
             messagebox.showerror("Export", str(ex))
             return
-        self.status.config(text=f"exported {base}.wav / .png")
+        self.status.config(text=f"exported {len(idx)} occurrence(s) to {folder}")
 
     def praat(self):
         sel = self.tree.selection()
